@@ -1,1 +1,75 @@
+name: Add IP to FortiGate blacklist
 
+on:
+  repository_dispatch:
+    types: [add_blacklist_ip]
+
+permissions:
+  contents: write
+
+jobs:
+  update-blacklist:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate and add IP
+        env:
+          IP: ${{ github.event.client_payload.ip }}
+        shell: bash
+        run: |
+          # Validar que sea una IPv4 pública válida
+          python3 - <<'PY'
+          import ipaddress
+          import os
+          import sys
+
+          raw = os.environ.get("IP", "").strip()
+
+          try:
+              ip = ipaddress.ip_address(raw)
+          except ValueError:
+              sys.exit(f"Invalid IP: {raw!r}")
+
+          if ip.version != 4 or not ip.is_global:
+              sys.exit(f"Rejected non-public IPv4: {ip}")
+
+          print(f"Validated IP: {ip}")
+          PY
+
+          git config user.name "wazuh-shuffle-bot"
+          git config user.email "wazuh-shuffle-bot@users.noreply.github.com"
+
+          # Reintentar para evitar problemas si llegan varias IP al mismo tiempo
+          for attempt in 1 2 3 4 5; do
+
+            git fetch origin main
+            git reset --hard origin/main
+
+            touch blacklist.txt
+
+            if grep -qxF "$IP" blacklist.txt; then
+              echo "$IP already exists in blacklist"
+              exit 0
+            fi
+
+            printf '%s\n' "$IP" >> blacklist.txt
+            sort -u -V blacklist.txt -o blacklist.txt
+
+            git add blacklist.txt
+            git commit -m "Block SSLVPN IP: $IP"
+
+            if git push origin HEAD:main; then
+              echo "Successfully added $IP"
+              exit 0
+            fi
+
+            sleep $((attempt * 2))
+          done
+
+          echo "Failed to update blacklist"
+          exit 1
